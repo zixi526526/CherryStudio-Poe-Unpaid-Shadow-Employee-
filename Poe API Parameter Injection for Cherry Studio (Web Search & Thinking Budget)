@@ -1,0 +1,358 @@
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse, HTMLResponse
+from pydantic import BaseModel
+import httpx
+import json
+import os
+from dotenv import load_dotenv
+
+# 加载 .env
+load_dotenv()
+
+# ================== 默认配置 ==================
+DEFAULT_CONFIG = {
+    "poe_api_key": os.getenv("POE_API_KEY", ""), 
+    "enable_web_search": True,
+    "claude_budget": 16000, # 默认值需在档位中
+    "gemini_budget": 16000,
+    "gpt_effort": "high"
+}
+
+# 全局配置
+current_config = DEFAULT_CONFIG.copy()
+
+app = FastAPI()
+
+# ================== 1. WebUI 2.0 (全按钮控制版) ==================
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Poe 智能控制台</title>
+    <style>
+        :root { --primary: #0071e3; --bg: #f5f5f7; --card: #ffffff; --text: #1d1d1f; --border: #d2d2d7; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif; max-width: 500px; margin: 40px auto; padding: 20px; background-color: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+        
+        /* 卡片风格 */
+        .card { background: var(--card); padding: 30px; border-radius: 18px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
+        h1 { margin: 0 0 25px 0; font-size: 22px; font-weight: 600; text-align: center; }
+        
+        .section-title { font-size: 13px; font-weight: 600; text-transform: uppercase; color: #86868b; margin-bottom: 10px; margin-top: 20px; letter-spacing: 0.5px; }
+        .control-group { margin-bottom: 15px; }
+        
+        /* 输入框 */
+        input[type="text"] { width: 100%; padding: 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 14px; box-sizing: border-box; outline: none; transition: border 0.2s; }
+        input[type="text"]:focus { border-color: var(--primary); }
+
+        /* 开关 (Toggle Switch) */
+        .toggle-row { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; cursor: pointer; }
+        .toggle-switch { position: relative; width: 50px; height: 30px; background-color: #e5e5e5; border-radius: 15px; transition: 0.3s; }
+        .toggle-switch::after { content: ''; position: absolute; width: 26px; height: 26px; border-radius: 50%; background: white; top: 2px; left: 2px; transition: 0.3s; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        input[type="checkbox"] { display: none; }
+        input[type="checkbox"]:checked + .toggle-switch { background-color: #34c759; }
+        input[type="checkbox"]:checked + .toggle-switch::after { transform: translateX(20px); }
+
+        /* 分段控制器 (Segmented Control) */
+        .segmented-control { display: flex; background: #f0f0f0; padding: 3px; border-radius: 9px; margin-bottom: 10px; }
+        .segment-btn { flex: 1; padding: 8px 0; text-align: center; font-size: 12px; font-weight: 500; color: #666; cursor: pointer; border-radius: 7px; transition: 0.2s; user-select: none; }
+        .segment-btn.active { background: white; color: black; box-shadow: 0 2px 5px rgba(0,0,0,0.05); font-weight: 600; transform: scale(1); }
+        .segment-btn:hover:not(.active) { background: rgba(255,255,255,0.5); }
+
+        /* 标签头优化 */
+        .label-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+        .current-val { font-size: 12px; color: var(--primary); font-weight: 600; }
+
+        /* 按钮 */
+        .save-btn { background-color: var(--primary); color: white; border: none; padding: 14px; border-radius: 12px; font-size: 16px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 20px; transition: transform 0.1s; }
+        .save-btn:active { transform: scale(0.98); }
+        
+        .status { text-align: center; margin-top: 15px; font-size: 13px; min-height: 20px; opacity: 0; transition: opacity 0.3s; }
+        .status.show { opacity: 1; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🛠️ Poe 智能控制台</h1>
+        
+        <div class="control-group">
+            <div class="section-title" style="margin-top: 0;">基础设置</div>
+            <input type="text" id="apiKey" placeholder="在此粘贴 Poe API Key (如 .env 为空)">
+        </div>
+
+        <div class="control-group">
+            <label class="toggle-row">
+                <span style="font-weight: 500;">联网搜索 (Web Search)</span>
+                <input type="checkbox" id="webSearch">
+                <div class="toggle-switch"></div>
+            </label>
+        </div>
+
+        <div class="control-group">
+            <div class="label-row">
+                <div class="section-title">Claude Budget</div>
+                <span id="disp_claude" class="current-val">16000</span>
+            </div>
+            <div class="segmented-control" id="claudeSegment">
+                <div class="segment-btn" onclick="setBudget('claude', 4000, this)">4k</div>
+                <div class="segment-btn" onclick="setBudget('claude', 8000, this)">8k</div>
+                <div class="segment-btn" onclick="setBudget('claude', 16000, this)">16k</div>
+                <div class="segment-btn" onclick="setBudget('claude', 24000, this)">24k</div>
+                <div class="segment-btn" onclick="setBudget('claude', 32000, this)">32k</div>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <div class="label-row">
+                <div class="section-title">Gemini Budget</div>
+                <span id="disp_gemini" class="current-val">16000</span>
+            </div>
+            <div class="segmented-control" id="geminiSegment">
+                <div class="segment-btn" onclick="setBudget('gemini', 4000, this)">4k</div>
+                <div class="segment-btn" onclick="setBudget('gemini', 8000, this)">8k</div>
+                <div class="segment-btn" onclick="setBudget('gemini', 16000, this)">16k</div>
+                <div class="segment-btn" onclick="setBudget('gemini', 24000, this)">24k</div>
+                <div class="segment-btn" onclick="setBudget('gemini', 32000, this)">32k</div>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <div class="label-row">
+                <div class="section-title">GPT / O1 Reasoning Effort</div>
+                <span id="disp_gpt" class="current-val">High</span>
+            </div>
+            <div class="segmented-control" id="gptSegment">
+                <div class="segment-btn" onclick="setEffort('minimal', this)">Minimal</div>
+                <div class="segment-btn" onclick="setEffort('low', this)">Low</div>
+                <div class="segment-btn" onclick="setEffort('medium', this)">Medium</div>
+                <div class="segment-btn active" onclick="setEffort('high', this)">High</div>
+            </div>
+        </div>
+
+        <button class="save-btn" onclick="saveConfig()">保存并生效</button>
+        <div id="status" class="status">✅ 配置已更新</div>
+    </div>
+
+    <script>
+        // 本地状态存储
+        let state = {
+            claude_budget: 16000,
+            gemini_budget: 16000,
+            gpt_effort: 'high'
+        };
+
+        // 设置 Budget (Claude / Gemini)
+        function setBudget(type, val, btn) {
+            state[type + '_budget'] = val;
+            
+            // 更新 UI 文字
+            document.getElementById('disp_' + type).innerText = val;
+            
+            // 更新按钮高亮
+            const container = document.getElementById(type + 'Segment');
+            container.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        }
+
+        // 设置 Effort (GPT)
+        function setEffort(val, btn) {
+            state.gpt_effort = val;
+            
+            // 更新 UI 文字
+            document.getElementById('disp_gpt').innerText = val.charAt(0).toUpperCase() + val.slice(1);
+
+            // 更新按钮高亮
+            const container = document.getElementById('gptSegment');
+            container.querySelectorAll('.segment-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        }
+
+        // 辅助：根据数值找到对应按钮并激活
+        function highlightBtnByValue(type, value) {
+            const container = document.getElementById(type + 'Segment');
+            // 模糊匹配：如果存储的值不在按钮里（比如手动改过），就不高亮或默认高亮一个
+            const btns = container.querySelectorAll('.segment-btn');
+            let found = false;
+            
+            btns.forEach(btn => {
+                // 从 onclick 属性中提取数值，或者简单的文本匹配
+                // 这里我们假设按钮的 onclick 包含该数值
+                if (btn.getAttribute('onclick').includes(value)) {
+                    btn.classList.add('active');
+                    found = true;
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+            
+            document.getElementById('disp_' + type).innerText = value;
+        }
+
+        // 页面加载读取配置
+        window.onload = async () => {
+            try {
+                const res = await fetch('/api/config');
+                const config = await res.json();
+                
+                document.getElementById('apiKey').value = config.poe_api_key;
+                document.getElementById('webSearch').checked = config.enable_web_search;
+                
+                // 同步状态
+                state.claude_budget = config.claude_budget;
+                state.gemini_budget = config.gemini_budget;
+                state.gpt_effort = config.gpt_effort;
+
+                // 渲染按钮状态
+                highlightBtnByValue('claude', config.claude_budget);
+                highlightBtnByValue('gemini', config.gemini_budget);
+                
+                // 渲染 GPT 按钮
+                const gptContainer = document.getElementById('gptSegment');
+                gptContainer.querySelectorAll('.segment-btn').forEach(b => {
+                    b.classList.remove('active');
+                    if(b.innerText.toLowerCase() === config.gpt_effort) b.classList.add('active');
+                });
+                document.getElementById('disp_gpt').innerText = config.gpt_effort.charAt(0).toUpperCase() + config.gpt_effort.slice(1);
+
+            } catch(e) {
+                console.error("加载配置失败", e);
+            }
+        };
+
+        // 保存配置
+        async function saveConfig() {
+            const config = {
+                poe_api_key: document.getElementById('apiKey').value,
+                enable_web_search: document.getElementById('webSearch').checked,
+                claude_budget: state.claude_budget,
+                gemini_budget: state.gemini_budget,
+                gpt_effort: state.gpt_effort
+            };
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                
+                const statusDiv = document.getElementById('status');
+                if(res.ok) {
+                    statusDiv.innerHTML = '✅ 配置已即时生效';
+                    statusDiv.style.color = 'green';
+                    statusDiv.classList.add('show');
+                    setTimeout(() => statusDiv.classList.remove('show'), 2000);
+                }
+            } catch(e) {
+                alert('连接错误');
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+class ConfigModel(BaseModel):
+    poe_api_key: str
+    enable_web_search: bool
+    claude_budget: int
+    gemini_budget: int
+    gpt_effort: str
+
+
+# ================== 2. 管理接口 ==================
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_ui():
+    return HTML_TEMPLATE
+
+@app.get("/api/config")
+async def get_config():
+    return current_config
+
+@app.post("/api/config")
+async def set_config(config: ConfigModel):
+    global current_config
+    current_config = config.dict()
+    print(f"\n[UI] 配置更新: Claude={current_config['claude_budget']} | GPT={current_config['gpt_effort']}")
+    return {"status": "success", "config": current_config}
+
+# ================== 3. 核心代理逻辑 (含自动重试与防断连) ==================
+
+@app.post("/v1/chat/completions")
+async def chat_proxy(request: Request):
+    # 动态读取
+    cfg = current_config
+    
+    try:
+        original_body = await request.json()
+    except:
+        original_body = {}
+
+    model_name = original_body.get("model", "").lower()
+    poe_payload = original_body.copy()
+    
+    # 清理参数
+    for k in ["reasoning_effort", "thinking_budget"]:
+        poe_payload.pop(k, None)
+    
+    if "extra_body" in poe_payload:
+        extra = poe_payload.pop("extra_body")
+        if isinstance(extra, dict): poe_payload.update(extra)
+
+    injected = []
+
+    # 1. 注入联网
+    if cfg["enable_web_search"]:
+        poe_payload["web_search"] = True
+        injected.append("Search:ON")
+
+    # 2. 注入思考参数
+    if "claude" in model_name and cfg["claude_budget"] > 0:
+        poe_payload["thinking_budget"] = cfg["claude_budget"]
+        injected.append(f"Budget:{cfg['claude_budget']}")
+    elif "gemini" in model_name and cfg["gemini_budget"] > 0:
+        poe_payload["thinking_budget"] = cfg["gemini_budget"]
+        injected.append(f"Budget:{cfg['gemini_budget']}")
+    else:
+        # GPT/O1
+        if cfg["enable_web_search"] and cfg["gpt_effort"]:
+            poe_payload["websearch_reasoning_effort"] = cfg["gpt_effort"]
+            injected.append(f"Effort:{cfg['gpt_effort']}")
+
+    print(f"-------------- 请求: {model_name} | {', '.join(injected)} --------------")
+    
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {cfg['poe_api_key']}"}
+    target_url = "https://api.poe.com/v1/chat/completions"
+
+    # === 关键：抗断连配置 ===
+    timeout_config = httpx.Timeout(connect=120.0, read=None, write=120.0, pool=None)
+
+    async def upstream_generator():
+        max_retries = 2
+        async with httpx.AsyncClient(timeout=timeout_config, http2=False) as client:
+            for attempt in range(max_retries):
+                try:
+                    async with client.stream("POST", target_url, json=poe_payload, headers=headers) as response:
+                        if response.status_code != 200:
+                            err = b"".join([chunk async for chunk in response.aiter_bytes()]).decode()
+                            print(f"❌ API 报错: {err}")
+                            yield err.encode()
+                            return
+                        
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
+                        return # 成功则退出
+
+                except Exception as e:
+                    print(f"⚠️ 连接波动 (尝试 {attempt+1}/{max_retries}): {e}")
+                    if attempt == max_retries - 1:
+                        yield f'{{"error": "Poe 连接超时，请检查网络或降低思考强度。\\nDetail: {str(e)}"}}'.encode()
+
+    return StreamingResponse(upstream_generator(), media_type="text/event-stream")
+
+if __name__ == "__main__":
+    print("🚀 Poe 控制台已启动: http://127.0.0.1:8001")
+    uvicorn.run(app, host="127.0.0.1", port=8001)
