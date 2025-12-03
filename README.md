@@ -30,9 +30,7 @@ pip install -r requirements.txt
 POE_API_KEY=xxxxxxxxxx
 ```
 ### 3. 运行
-```bash
-python POE.py
-```
+下载"POE in Cherry.py"到项目根目录并运行
 ### 4. 在Cherry Studio中新建一个模型供应商(Openai类型),如POE_DIY
 Base URL: http://127.0.0.1:8001/v1
 
